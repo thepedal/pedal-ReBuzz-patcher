@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>PedalPatch</RootNamespace>
+    <AssemblyName>Pedal Patch.NET</AssemblyName>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <BuzzDir Condition="'$(BuzzDir)' == ''">C:\Program Files\ReBuzz</BuzzDir>
+    <DeployAfterBuild Condition="'$(DeployAfterBuild)' == ''">true</DeployAfterBuild>
+    <DeployDir>$(BuzzDir)\Gear\Effects\</DeployDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BuzzGUI.Common">
+      <HintPath>$(BuzzDir)\BuzzGUI.Common.dll</HintPath>
+    </Reference>
+    <Reference Include="BuzzGUI.Interfaces">
+      <HintPath>$(BuzzDir)\BuzzGUI.Interfaces.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="PostBuild" AfterTargets="Build" Condition="'$(DeployAfterBuild)' == 'true'">
+    <Message Text="Deploying $(TargetFileName) to $(DeployDir)" Importance="high"/>
+    <MakeDir Directories="$(DeployDir)" Condition="!Exists('$(DeployDir)')"/>
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DeployDir)"/>
+  </Target>
+
+</Project>

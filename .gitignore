@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+Debug/
+Release/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# dotnet
+*.nupkg
+project.assets.json
+project.nuget.cache
+
+# OS
+.DS_Store
+Thumbs.db

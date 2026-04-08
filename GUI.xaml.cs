@@ -11,10 +11,12 @@ namespace PedalPatch
     public partial class GUI : UserControl, IMachineGUI
     {
         // ── Cached brushes ────────────────────────────────────────────────────
-        static readonly SolidColorBrush BrushOff      = new(Color.FromRgb(0x33, 0x33, 0x33));
-        static readonly SolidColorBrush BrushOffBorder = new(Color.FromRgb(0x50, 0x50, 0x50));
-        static readonly SolidColorBrush BrushOn       = new(Color.FromRgb(0x15, 0x72, 0xE8));
-        static readonly SolidColorBrush BrushOnBorder = new(Color.FromRgb(0x44, 0xAA, 0xFF));
+        static readonly SolidColorBrush BrushOff        = new(Color.FromRgb(0x33, 0x33, 0x33));
+        static readonly SolidColorBrush BrushOffBorder  = new(Color.FromRgb(0x50, 0x50, 0x50));
+        static readonly SolidColorBrush BrushOn         = new(Color.FromRgb(0x15, 0x72, 0xE8));
+        static readonly SolidColorBrush BrushOnBorder   = new(Color.FromRgb(0x44, 0xAA, 0xFF));
+        static readonly SolidColorBrush BrushSignal     = new(Color.FromRgb(0xE8, 0x82, 0x00));
+        static readonly SolidColorBrush BrushSignalBorder = new(Color.FromRgb(0xFF, 0xAA, 0x22));
 
         // ── State ─────────────────────────────────────────────────────────────
         CMachine machine;
@@ -23,6 +25,7 @@ namespace PedalPatch
         TextBlock[] outLabels;
         bool dragging;
         bool dragSetValue;
+        System.Windows.Threading.DispatcherTimer _vuTimer;
 
         // ─────────────────────────────────────────────────────────────────────
         public GUI() { InitializeComponent(); PreviewMouseUp += (_, _) => dragging = false; }
@@ -36,7 +39,11 @@ namespace PedalPatch
             get => _iMachine;
             set
             {
-                if (machine != null) machine.PropertyChanged -= OnMachinePropertyChanged;
+                if (machine != null)
+                {
+                    machine.PropertyChanged -= OnMachinePropertyChanged;
+                    _vuTimer?.Stop();
+                }
 
                 _iMachine = value;
                 machine   = value?.ManagedMachine as CMachine;
@@ -44,6 +51,7 @@ namespace PedalPatch
                 if (machine == null) return;
 
                 machine.PropertyChanged += OnMachinePropertyChanged;
+                StartVuTimer();
                 BuildMatrix();
                 PopulatePatchCombo();
                 RefreshMatrix();
@@ -176,15 +184,42 @@ namespace PedalPatch
         };
 
         // ─────────────────────────────────────────────────────────────────────
+        const float VuThreshold = 0.001f; // ~-60 dBFS
+
+        void StartVuTimer()
+        {
+            _vuTimer?.Stop();
+            _vuTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(50)
+            };
+            _vuTimer.Tick += (_, _) => RefreshVu();
+            _vuTimer.Start();
+        }
+
+        void RefreshVu()
+        {
+            if (machine == null || cells == null) return;
+            for (int i = 0; i < CMachine.NumInputs; i++)
+            for (int o = 0; o < CMachine.NumOutputs; o++)
+            {
+                bool on     = machine.GetConnection(i, o);
+                bool signal = on && machine.VuLevel[i, o] > VuThreshold;
+                cells[i, o].Background  = signal ? BrushSignal      : on ? BrushOn       : BrushOff;
+                cells[i, o].BorderBrush = signal ? BrushSignalBorder : on ? BrushOnBorder : BrushOffBorder;
+            }
+        }
+
         void RefreshMatrix()
         {
             if (machine == null || cells == null) return;
             for (int i = 0; i < CMachine.NumInputs; i++)
             for (int o = 0; o < CMachine.NumOutputs; o++)
             {
-                bool on = machine.GetConnection(i, o);
-                cells[i, o].Background  = on ? BrushOn       : BrushOff;
-                cells[i, o].BorderBrush = on ? BrushOnBorder : BrushOffBorder;
+                bool on     = machine.GetConnection(i, o);
+                bool signal = on && machine.VuLevel[i, o] > VuThreshold;
+                cells[i, o].Background  = signal ? BrushSignal      : on ? BrushOn       : BrushOff;
+                cells[i, o].BorderBrush = signal ? BrushSignalBorder : on ? BrushOnBorder : BrushOffBorder;
             }
         }
 

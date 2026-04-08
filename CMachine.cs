@@ -28,15 +28,11 @@ namespace PedalPatch
         readonly float[,] targetGain = new float[NumInputs, NumOutputs];
         readonly string[] inputLabels  = new string[NumInputs];
         readonly string[] outputLabels = new string[NumOutputs];
+        internal readonly float[,] VuLevel = new float[NumInputs, NumOutputs];
 
         bool[,] clipboard;
         CMachineStateData pendingLoad;
         int _currentPatch;
-
-        // Cached reflection helpers
-        System.Reflection.PropertyInfo _bufferProp;
-        System.Reflection.PropertyInfo _destChProp;
-        System.Reflection.PropertyInfo _srcChProp;
 
         public event PropertyChangedEventHandler PropertyChanged;
         void Notify(string p) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(p));
@@ -48,25 +44,38 @@ namespace PedalPatch
             for (int i = 0; i < NumInputs;  i++) inputLabels[i]  = $"In {i + 1}";
             for (int o = 0; o < NumOutputs; o++) outputLabels[o] = $"Out {o + 1}";
 
-            // host.Machine is null at construction time; defer one dispatcher tick
-            System.Windows.Application.Current?.Dispatcher.BeginInvoke(new Action(() =>
-            {
-                try
-                {
-                    var f = System.Reflection.BindingFlags.Public |
-                            System.Reflection.BindingFlags.NonPublic |
-                            System.Reflection.BindingFlags.Instance;
-                    host.Machine?.GetType().GetProperty("InputChannelCount",  f)?.SetValue(host.Machine, NumInputs);
-                    host.Machine?.GetType().GetProperty("OutputChannelCount", f)?.SetValue(host.Machine, NumOutputs);
-                }
-                catch { }
-            }));
+            // Set channel counts when this machine is added to the song
+            // (host.Machine is null during construction)
+            Global.Buzz.Song.MachineAdded += OnMachineAdded;
+            Global.Buzz.Song.MachineRemoved += OnMachineRemoved;
+        }
+
+        void OnMachineAdded(IMachine m)
+        {
+            if (m != host.Machine) return;
+            host.InputChannelCount  = NumInputs;
+            host.OutputChannelCount = NumOutputs;
+        }
+
+        void OnMachineRemoved(IMachine m)
+        {
+            if (m != host.Machine) return;
+            Global.Buzz.Song.MachineAdded   -= OnMachineAdded;
+            Global.Buzz.Song.MachineRemoved -= OnMachineRemoved;
+        }
+
+        // ── Channel naming (shown in ReBuzz connection circle tooltip) ────────
+        public string GetChannelName(bool input, int index)
+        {
+            if (input  && index >= 0 && index < NumInputs)  return inputLabels[index];
+            if (!input && index >= 0 && index < NumOutputs) return outputLabels[index];
+            return "";
         }
 
         // ── Global parameter ──────────────────────────────────────────────────
         [ParameterDecl(IsStateless = false, Name = "Patch",
                        MinValue = 0, MaxValue = NumPatches - 1, DefValue = 0,
-                       Description = "Active patch (0-23)")]
+                       Description = "Active patch (0-47)")]
         public int CurrentPatch
         {
             get => _currentPatch;
@@ -105,7 +114,7 @@ namespace PedalPatch
 
             [ParameterDecl(IsStateless = true, Name = "Argument",
                            MinValue = 0, MaxValue = 0xFFFF, DefValue = 0xFFFF,
-                           Description = "High byte = input (0-based), Low byte = output (0-based)")]
+                           Description = "High byte = input (1-based), Low byte = output (1-based)")]
             public int Argument { get; set; }
         }
 
@@ -195,81 +204,54 @@ namespace PedalPatch
         }
 
         // ── Audio ─────────────────────────────────────────────────────────────
-        // Buffer is on the concrete ReBuzz type, not IMachineConnection interface
-        Sample[] GetBuffer(IMachineConnection conn)
-        {
-            if (_bufferProp == null)
-                _bufferProp = conn.GetType().GetProperty("Buffer");
-            return _bufferProp?.GetValue(conn) as Sample[];
-        }
-
-        public bool Work(Sample[] output, Sample[] input, int n, WorkModes mode)
+        // EffectBlockMulti signature — ReBuzz provides per-channel buffers directly.
+        // input[i] is the Sample[] for input channel i (null if nothing connected).
+        // output[o] is the Sample[] for output channel o (null if nothing connected).
+        public bool Work(IList<Sample[]> output, IList<Sample[]> input, int n, WorkModes mode)
         {
             if (Tracks != null)
                 foreach (var t in Tracks)
                     if (t.Command != 255) RunCommand(t.Command, t.Argument);
-
-            if (host.Machine == null) return false;
-
-            var inputs  = host.Machine.Inputs;
-            var outputs = host.Machine.Outputs;
-
-            // Zero all output connection buffers
-            foreach (var outConn in outputs)
-            {
-                var buf = GetBuffer(outConn);
-                if (buf == null) continue;
-                for (int s = 0; s < n; s++) { buf[s].L = 0f; buf[s].R = 0f; }
-                outConn.Amp = 0;
-            }
 
             float sr    = host.MasterInfo.SamplesPerSec;
             float fadeN = _fadeTimeMs > 0 ? _fadeTimeMs * sr / 1000f : 1f;
             float step  = 1f / fadeN;
             bool anyActive = false;
 
-            foreach (var inConn in inputs)
+            // Zero all output buffers
+            for (int o = 0; o < NumOutputs; o++)
             {
-                int inCh   = inConn.DestinationChannel;
-                var inBuf  = GetBuffer(inConn);
-                if (inCh < 0 || inCh >= NumInputs || inBuf == null) continue;
+                if (o >= output.Count || output[o] == null) continue;
+                for (int s = 0; s < n; s++) { output[o][s].L = 0f; output[o][s].R = 0f; }
+            }
 
-                foreach (var outConn in outputs)
+            for (int i = 0; i < NumInputs; i++)
+            {
+                if (i >= input.Count || input[i] == null) continue;
+
+                for (int o = 0; o < NumOutputs; o++)
                 {
-                    int outCh  = outConn.SourceChannel;
-                    var outBuf = GetBuffer(outConn);
-                    if (outCh < 0 || outCh >= NumOutputs || outBuf == null) continue;
+                    if (o >= output.Count || output[o] == null) continue;
 
-                    float g  = gain[inCh, outCh];
-                    float tg = targetGain[inCh, outCh];
-                    if (g == 0f && tg == 0f) continue;
+                    float g  = gain[i, o];
+                    float tg = targetGain[i, o];
+                    if (g == 0f && tg == 0f) { VuLevel[i, o] *= 0.85f; continue; }
 
+                    float peak = 0f;
                     for (int s = 0; s < n; s++)
                     {
                         if      (g < tg) g = MathF.Min(g + step, tg);
                         else if (g > tg) g = MathF.Max(g - step, tg);
-                        outBuf[s].L += inBuf[s].L * g;
-                        outBuf[s].R += inBuf[s].R * g;
+                        output[o][s].L += input[i][s].L * g;
+                        output[o][s].R += input[i][s].R * g;
+                        float lv = MathF.Abs(input[i][s].L);
+                        float rv = MathF.Abs(input[i][s].R);
+                        if (lv > peak) peak = lv;
+                        if (rv > peak) peak = rv;
                     }
-                    gain[inCh, outCh] = g;
-                    outConn.Amp = 16384;
+                    gain[i, o] = g;
+                    VuLevel[i, o] = MathF.Max(peak, VuLevel[i, o] * 0.85f);
                     anyActive = true;
-                }
-            }
-
-            // Write mix of active outputs to the Work output buffer
-            if (output != null)
-            {
-                for (int s = 0; s < n; s++) { output[s].L = 0f; output[s].R = 0f; }
-                foreach (var outConn in outputs)
-                {
-                    var mixBuf = GetBuffer(outConn);
-                    if (outConn.Amp == 0 || mixBuf == null) continue;
-                    for (int s = 0; s < n; s++)
-                    {
-                        output[s].L += mixBuf[s].L;
-                        output[s].R += mixBuf[s].R;
-                    }
                 }
             }
 
@@ -328,15 +310,6 @@ namespace PedalPatch
                 for (int i = 0; i < NumInputs;  i++)
                 for (int o = 0; o < NumOutputs; o++)
                     w.Write(routing[p, i, o]);
-
-                // Connection channel assignments keyed by connected machine name
-                var inConns  = host.Machine?.Inputs  ?? (IList<IMachineConnection>)new List<IMachineConnection>();
-                var outConns = host.Machine?.Outputs ?? (IList<IMachineConnection>)new List<IMachineConnection>();
-                w.Write(inConns.Count);
-                foreach (var c in inConns)  { w.Write(c.Source?.Name      ?? ""); w.Write(c.DestinationChannel); }
-                w.Write(outConns.Count);
-                foreach (var c in outConns) { w.Write(c.Destination?.Name ?? ""); w.Write(c.SourceChannel); }
-
                 return new CMachineStateData { Data = ms.ToArray() };
             }
             set { pendingLoad = value; }
@@ -352,40 +325,13 @@ namespace PedalPatch
                 byte version = r.ReadByte();
                 _fadeTimeMs     = r.ReadInt32();
                 _confirmOnClear = r.ReadBoolean();
-                if (version == 1) r.ReadBoolean(); // _autoName was removed in v2 — discard
+                if (version == 1) r.ReadBoolean(); // _autoName removed in v2 — discard
                 for (int i = 0; i < NumInputs;  i++) inputLabels[i]  = r.ReadString();
                 for (int o = 0; o < NumOutputs; o++) outputLabels[o] = r.ReadString();
                 for (int p = 0; p < NumPatches; p++)
                 for (int i = 0; i < NumInputs;  i++)
                 for (int o = 0; o < NumOutputs; o++)
                     routing[p, i, o] = r.ReadBoolean();
-
-                if (version >= 2)
-                {
-                    var inChans  = new Dictionary<string, int>();
-                    var outChans = new Dictionary<string, int>();
-                    int inCnt  = r.ReadInt32();
-                    for (int i = 0; i < inCnt;  i++) { string nm = r.ReadString(); inChans[nm]  = r.ReadInt32(); }
-                    int outCnt = r.ReadInt32();
-                    for (int o = 0; o < outCnt; o++) { string nm = r.ReadString(); outChans[nm] = r.ReadInt32(); }
-
-                    if (host.Machine != null)
-                    {
-                        foreach (var c in host.Machine.Inputs)
-                        {
-                            if (!inChans.TryGetValue(c.Source?.Name ?? "", out int ch)) continue;
-                            _destChProp ??= c.GetType().GetProperty("DestinationChannel");
-                            _destChProp?.SetValue(c, ch);
-                        }
-                        foreach (var c in host.Machine.Outputs)
-                        {
-                            if (!outChans.TryGetValue(c.Destination?.Name ?? "", out int ch)) continue;
-                            _srcChProp ??= c.GetType().GetProperty("SourceChannel");
-                            _srcChProp?.SetValue(c, ch);
-                        }
-                    }
-                }
-
                 RefreshTargetGains();
                 Notify(nameof(Routing));
                 Notify(nameof(InputLabels));
